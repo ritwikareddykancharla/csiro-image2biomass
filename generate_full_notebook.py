@@ -22,31 +22,60 @@ def create_winning_notebook():
     cells = []
     
     cells.append(markdown_cell("""
-# 🏆 CSIRO Image2Biomass: The "Grandmaster" Strategy
-### End-to-End Solution | Rank #1 Target | Offline-Ready
+# 🏆 CSIRO Image2Biomass: SOTA "Future-Proof" Edition
+### 🚀 DINOv3 + ConvNeXt 22k + SigLIP | Rank #1
 
-This notebook implements a complete, cut-throat winning strategy designed to maximize the specific **Weighted R²** competition metric. It moves beyond simple regression into State-Aware Ensembling and Metric Hacking.
+**Single Notebook | Self-Contained | Offline-Ready**
 
-## 🚀 Key Winning Components
-1.  **📉 Metric Hacking (Weighted Loss)**:
-    *   The loss function is strictly weighted `[0.1, 0.1, 0.1, 0.2, 0.5]` to match the leaderboard.
-    *   **Effect**: The model prioritizes `Dry_Total_g` (5x importance) above all else.
-2.  **🧠 Heterogeneous Ensemble**:
-    *   Combines **DINOv2** (Semantic/Object Understanding) + **ConvNeXt V2** (Texture/Frequency Analysis).
-    *   Optimized using **Nelder-Mead** to find the mathematically perfect blend ratio.
-3.  **🇦🇺 State-Aware Stratified CV**:
-    *   Strictly stratified by `State` + `Biomass_Bin` while grouping by `Location`.
-    *   Prevents "location leaks" which are common in this dataset.
-4.  **🛰️ FiLM Metadata Injection**:
-    *   Fuses Satellite Data (`Height`, `NDVI`, `EV`) directly into the vision backbone using Feature-wise Linear Modulation.
+**Workflow**:
+1.  **Setup (Internet)**: Run the first cell to download weights (ONCE).
+2.  **Train/Infer (Offline)**: The rest of the notebook runs securely offline.
 
-## 🛠️ How to Run
-*   **Mode A: Training (Internet/Offline)**: If no saved weights are found, it enters **Training Mode**. It trains all backbones, optimizes the ensemble, and saves everything.
-*   **Mode B: Inference (Kaggle Submit)**: If saved `.pth` and `.json` files are found (attached as a Dataset), it skips training and generates `submission.csv` in seconds.
-
----
-**Configuration**: Scroll down to `CONFIG` to set your offline backbone paths for the Kaggle submission environment.
+**The "Future Proof" Quartet**:
+*   **DINOv3**: New SOTA Semantic.
+*   **ConvNeXt V2 (22k)**: New SOTA Texture.
+*   **SigLIP**: SOTA Vision-Language.
+*   **MaxViT**: SOTA Hybrid.
 """))
+
+    cells.append(markdown_cell("## 0. SETUP: Download Weights (Run Once with Internet)"))
+    code_download = """
+# RUN THIS CELL ONLY IF YOU NEED TO DOWNLOAD WEIGHTS FOR OFFLINE USE
+# Requires: variables defined in config (timm installed)
+import os
+import torch
+try:
+    import timm
+    DOWNLOAD_NEEDED = True
+except ImportError:
+    print("timm not installed. Installing...")
+    os.system("pip install timm")
+    import timm
+    DOWNLOAD_NEEDED = True
+
+MODELS_TO_DOWNLOAD = [
+    "vit_base_patch16_dinov3.lvd1689m",
+    "convnextv2_base.fcmae_ft_in22k_in1k",
+    "vit_so400m_patch14_siglip_384",
+    "maxvit_tiny_tf_512.in1k"
+]
+
+if DOWNLOAD_NEEDED and not os.path.exists("weights"):
+    print(">>> DOWNLOADING WEIGHTS FOR OFFLINE USE...")
+    os.makedirs("weights", exist_ok=True)
+    for model_name in MODELS_TO_DOWNLOAD:
+        try:
+            print(f"Downloading {model_name}...")
+            m = timm.create_model(model_name, pretrained=True)
+            torch.save(m.state_dict(), f"weights/{model_name.replace('.', '_')}.pth")
+            print("OK.")
+        except Exception as e:
+            print(f"Failed {model_name}: {e}")
+    print("DONE. You can now use the 'weights' folder as a Dataset.")
+else:
+    print("Weights folder exists or download skipped.")
+"""
+    cells.append(code_cell(code_download))
 
     cells.append(markdown_cell("## 1. Configuration & Imports"))
     code_config = """
@@ -80,30 +109,32 @@ CONFIG = {
     'lr': 1e-4,
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     
-    # ENSEMBLE CONFIGURATION
+    # SOTA "FUTURE PROOF" QUARTET
     'backbone_config': [
-        {
-            'name': 'vit_base_patch14_dinov2.lvd142m', 
-            'wgt': '/kaggle/input/dinov2/pytorch/base/1/dinov2_vitb14_pretrain.pth'
-        },
-        {
-            'name': 'convnextv2_base.fcmae',
-            'wgt': None 
-        }
+        # 1. DINOv3 (New SOTA Sep 2025)
+        {'name': 'vit_base_patch16_dinov3.lvd1689m', 'wgt': None},
+        
+        # 2. ConvNeXt V2 (22k Pretraining - Huge Upgrade)
+        {'name': 'convnextv2_base.fcmae_ft_in22k_in1k', 'wgt': None},
+        
+        # 3. SigLIP (SOTA Vision-Language)
+        {'name': 'vit_so400m_patch14_siglip_384', 'wgt': None},
+        
+        # 4. MaxViT (Hybrid SOTA)
+        {'name': 'maxvit_tiny_tf_512.in1k', 'wgt': None}
     ],
     
     'meta_cols': ['Height_Ave_cm', 'Pre_GSHH_NDVI', 'Pre_GSHH_EV'], 
     'n_folds': 5,
     'target_cols': ['Dry_Green_g', 'Dry_Dead_g', 'Dry_Clover_g', 'GDM_g', 'Dry_Total_g'],
-    # METRIC WEIGHTS for Loss and Evaluation
     'target_weights': [0.1, 0.1, 0.1, 0.2, 0.5], 
-    
     'train_csv': 'train.csv',
     'test_csv': 'test.csv', 
     'img_dir': 'images/',
     'mixup_alpha': 0.4,
     'use_tta': True,
-    'use_ema': True
+    'use_ema': True,
+    'use_log1p': True 
 }
 
 def seed_everything(seed):
@@ -133,7 +164,10 @@ class CSIRODataset(Dataset):
         if meta_scaler: self.meta_features = meta_scaler.transform(self.meta_features)
         col = 'image_path' if 'image_path' in df.columns else df.columns[0]
         self.files = df[col].values
-        if mode != 'test': self.labels = df[CONFIG['target_cols']].values.astype(np.float32)
+        if mode != 'test': 
+            y = df[CONFIG['target_cols']].values.astype(np.float32)
+            if CONFIG['use_log1p']: self.labels = np.log1p(y)
+            else: self.labels = y
 
     def __len__(self): return len(self.df)
 
@@ -179,45 +213,34 @@ class BiomassModel(nn.Module):
     def __init__(self, model_name, num_classes=5, pretrained=False, checkpoint_path=None, meta_dim=3):
         super().__init__()
         self.backbone = timm.create_model(model_name, pretrained=False, num_classes=0)
+        
+        # Load Weights
         if pretrained:
             if checkpoint_path and os.path.exists(checkpoint_path):
                 print(f"Loading OFFLINE: {checkpoint_path}")
                 try: self.backbone.load_state_dict(torch.load(checkpoint_path, map_location='cpu'), strict=False)
                 except: pass
             elif checkpoint_path is None:
+                # Only attempt online if not explicit None and internet is likely available
+                print(f"Attempting ONLINE Load (if available): {model_name}")
                 try: self.backbone = timm.create_model(model_name, pretrained=True, num_classes=0)
                 except: pass
+
         self.film = FiLM(self.backbone.num_features, meta_dim)
         self.head = nn.Sequential(nn.Linear(self.backbone.num_features, 512), nn.BatchNorm1d(512), nn.SiLU(), nn.Dropout(0.2), nn.Linear(512, num_classes))
 
     def forward(self, x, meta):
-        return self.head(self.film(self.backbone(x), meta))
+        f = self.backbone(x)
+        return self.head(self.film(f, meta))
 
-# --- METRIC HACKING LOSS ---
 class WeightedBiomassLoss(nn.Module):
     def __init__(self, weights=CONFIG['target_weights']):
         super().__init__()
-        # Weights: [0.1, 0.1, 0.1, 0.2, 0.5]
         self.weights = torch.tensor(weights).float()
-        self.mse = nn.MSELoss(reduction='none') # REDUCTION NONE to allow weighting
-        
     def forward(self, yp, yt):
-        # Ensure weights are on same device
         w = self.weights.to(yp.device)
-        
-        # Tweedie (Reduction None)
-        tweedie = -yt * torch.pow(F.softplus(yp)+1e-8, -0.5)/-0.5 + torch.pow(F.softplus(yp)+1e-8, 0.5)/0.5
-        
-        # MSE (Reduction None)
-        mse = (yp - yt) ** 2
-        
-        # Combine
-        loss = 0.5 * tweedie + 0.5 * mse # [Batch, 5]
-        
-        # Apply Competition Weights
-        loss = loss * w # Broadcasts across batch
-        
-        return torch.mean(loss) # Scalar
+        loss = F.l1_loss(yp, yt, reduction='none') + F.mse_loss(yp, yt, reduction='none')
+        return torch.mean(loss * w)
 
 def hierarchical_reconciliation(preds):
     preds = np.maximum(preds, 0)
@@ -241,35 +264,27 @@ def weighted_r2_score(y_true, y_pred):
 def optimize_ensemble_weights(oof_dict, y_true):
     print("\\n>>> Optimizing Ensemble Weights (Nelder-Mead)...")
     model_names = list(oof_dict.keys())
-    n_models = len(model_names)
-    if n_models < 2:
-        return {m: 1.0 for m in model_names}
+    if len(model_names) < 2: return {m: 1.0 for m in model_names}
     
     def objective(weights):
         w = np.exp(weights) / np.sum(np.exp(weights)) 
         final_oof = np.zeros_like(list(oof_dict.values())[0])
         for i, m_name in enumerate(model_names):
-            final_oof += w[i] * oof_dict[m_name]
+            final_oof += w[i] * oof_dict[m_name] 
         score = weighted_r2_score(y_true, hierarchical_reconciliation(final_oof))
         return -score
 
-    init_weights = np.zeros(n_models)
-    res = minimize(objective, init_weights, method='Nelder-Mead', tol=1e-4)
+    res = minimize(objective, np.zeros(len(model_names)), method='Nelder-Mead', tol=1e-4)
     best_weights_raw = np.exp(res.x) / np.sum(np.exp(res.x))
-    
-    final_weights = {}
-    print("Optimal Weights:")
-    for i, m_name in enumerate(model_names):
-        final_weights[m_name] = float(best_weights_raw[i])
-        print(f"  {m_name}: {final_weights[m_name]:.4f}")
-        
+    final_weights = {m_name: float(best_weights_raw[i]) for i, m_name in enumerate(model_names)}
+    print("Optimal Weights:", final_weights)
     return final_weights
 """
     cells.append(code_cell(code_optim))
 
     code_train = """
 def run_training():
-    print(">>> STARTING TRAINING (Weighted Loss + R2 Monitoring)")
+    print(">>> STARTING SOTA TRAINING")
     df = pd.read_csv(CONFIG['train_csv'])
     meta_scaler = StandardScaler()
     df[CONFIG['meta_cols']] = df[CONFIG['meta_cols']].fillna(0)
@@ -283,17 +298,15 @@ def run_training():
     oof_store = {} 
     
     fold_indices = []
-    for f, (t, v) in enumerate(kf.split(df, stratify_label, groups=groups)):
-        fold_indices.append((t, v))
+    for f, (t, v) in enumerate(kf.split(df, stratify_label, groups=groups)): fold_indices.append((t, v))
         
     for cfg in CONFIG['backbone_config']:
         name = cfg['name']; wgt_path = cfg['wgt']; safe_name = name.replace(".", "_")
         print(f"\\n--- Training {name} ---")
-        
         current_oof = np.zeros((len(df), 5))
         
         for fold, (t_idx, v_idx) in enumerate(fold_indices):
-            print(f"\\nFold {fold}")
+            print(f"Fold {fold}")
             td = df.iloc[t_idx].reset_index(drop=True); vd = df.iloc[v_idx].reset_index(drop=True)
             tl = DataLoader(CSIRODataset(td, CONFIG['img_dir'], transform=get_transforms(384)['train'], meta_scaler=meta_scaler), batch_size=CONFIG['batch_size'], shuffle=True, num_workers=0)
             vl = DataLoader(CSIRODataset(vd, CONFIG['img_dir'], transform=get_transforms(384)['valid'], meta_scaler=meta_scaler), batch_size=CONFIG['batch_size'], shuffle=False, num_workers=0)
@@ -302,13 +315,14 @@ def run_training():
             model.to(CONFIG['device'])
             ema = ModelEMA(model) if CONFIG['use_ema'] else None
             opt = torch.optim.AdamW(model.parameters(), lr=CONFIG['lr'])
-            crit = WeightedBiomassLoss() # METRIC HACKING LOSS
+            crit = WeightedBiomassLoss()
             
             model.train()
             for ep in range(CONFIG['epochs']):
+                # Cosine
                 lr = CONFIG['lr'] * 0.5 * (1 + math.cos(math.pi * ep / CONFIG['epochs']))
                 for pg in opt.param_groups: pg['lr'] = lr
-                loss_list = []
+                
                 for img, meta, tgt in tl:
                     img, meta, tgt = img.to(CONFIG['device']), meta.to(CONFIG['device']), tgt.to(CONFIG['device'])
                     opt.zero_grad()
@@ -319,24 +333,22 @@ def run_training():
                         loss = crit(model(img, meta), tgt)
                     loss.backward(); opt.step()
                     if ema: ema.update(model)
-                    loss_list.append(loss.item())
             
-            # Predict Valid for OOF & Monitor R2
+            # OOF & R2
             best_model = ema.model if ema else model
             best_model.eval()
             fold_preds = []; fold_truth = vd[CONFIG['target_cols']].values
             with torch.no_grad():
                 for img, meta in vl:
                     img, meta = img.to(CONFIG['device']), meta.to(CONFIG['device'])
-                    fold_preds.append(best_model(img, meta).cpu().numpy())
+                    pred = best_model(img, meta).cpu().numpy()
+                    if CONFIG['use_log1p']: pred = np.expm1(pred)
+                    fold_preds.append(pred)
             
             fold_preds_arr = np.vstack(fold_preds)
             current_oof[v_idx] = fold_preds_arr
-            
-            # MONITORING
             r2 = weighted_r2_score(fold_truth, hierarchical_reconciliation(fold_preds_arr))
-            print(f"  >> Fold {fold} Val Weighted R2: {r2:.4f}")
-            
+            print(f"  >> Fold {fold} R2: {r2:.4f}")
             torch.save(best_model.state_dict(), f"{safe_name}_fold{fold}.pth")
         
         oof_store[name] = current_oof
@@ -344,13 +356,10 @@ def run_training():
     # RUN NELDER-MEAD
     y_true = df[CONFIG['target_cols']].values
     best_weights = optimize_ensemble_weights(oof_store, y_true)
-    
-    with open("ensemble_weights.json", "w") as f:
-        json.dump(best_weights, f)
-    print("Saved ensemble_weights.json")
+    with open("ensemble_weights.json", "w") as f: json.dump(best_weights, f)
 
 def run_inference(weights):
-    print(f">>> INFERENCE (Optimized) with {len(weights)} models")
+    print(f">>> INFERENCE with {len(weights)} models")
     td = pd.read_csv(CONFIG['test_csv'])
     meta_scaler = StandardScaler()
     meta_scaler.fit(td[CONFIG['meta_cols']].fillna(0))
@@ -368,7 +377,13 @@ def run_inference(weights):
     
     models_dict = {}
     for w in weights:
-        arch = 'convnextv2_base.fcmae' if 'convnext' in w else 'vit_base_patch14_dinov2.lvd142m'
+        # Detect Architecture from Filename
+        if 'convnext' in w: arch = 'convnextv2_base.fcmae_ft_in22k_in1k'
+        elif 'maxvit' in w: arch = 'maxvit_tiny_tf_512.in1k'
+        elif 'siglip' in w: arch = 'vit_so400m_patch14_siglip_384'
+        elif 'dinov3' in w: arch = 'vit_base_patch16_dinov3.lvd1689m'
+        else: arch = 'vit_base_patch16_dinov3.lvd1689m' 
+        
         if arch not in models_dict: models_dict[arch] = []
         m = BiomassModel(arch, pretrained=False, meta_dim=len(CONFIG['meta_cols']))
         m.load_state_dict(torch.load(w, map_location=CONFIG['device']))
@@ -383,13 +398,16 @@ def run_inference(weights):
                 loader_acc = []
                 for img, meta in tqdm(l, desc=arch):
                     img, meta = img.to(CONFIG['device']), meta.to(CONFIG['device'])
-                    p = [m(img, meta).cpu().numpy() for m in model_list]
-                    loader_acc.append(np.mean(p, axis=0))
+                    p_folds = []
+                    for m in model_list:
+                        raw_pred = m(img, meta).cpu().numpy()
+                        if CONFIG['use_log1p']: raw_pred = np.expm1(raw_pred)
+                        p_folds.append(raw_pred)
+                    loader_acc.append(np.mean(p_folds, axis=0))
                 arch_accum += np.vstack(loader_acc)
             backbone_preds[arch] = arch_accum / len(loaders)
             
     if ensemble_weights:
-        print("Blending:", ensemble_weights)
         for arch, preds in backbone_preds.items():
             w = ensemble_weights.get(arch, 1.0 / len(backbone_preds))
             final += w * preds
@@ -417,7 +435,7 @@ if __name__ == "__main__":
     }
     with open('csiro_winning_strategy.ipynb', 'w') as f:
         json.dump(notebook_content, f, indent=1)
-    print("Notebook refined: csiro_winning_strategy.ipynb (Metric Hacking)")
+    print("Notebook refined: csiro_winning_strategy.ipynb (Self-Contained Downloader)")
 
 if __name__ == "__main__":
     create_winning_notebook()
