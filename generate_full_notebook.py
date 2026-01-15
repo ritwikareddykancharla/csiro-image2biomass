@@ -3,7 +3,6 @@ import json
 import os
 
 def create_winning_notebook():
-    # Helper to create code cell structure
     def code_cell(source_code):
         return {
             "cell_type": "code",
@@ -22,24 +21,41 @@ def create_winning_notebook():
 
     cells = []
     
-    # --- CELL 1: Main Header ---
     cells.append(markdown_cell("""
-# CSIRO Image2Biomass: Unified Strategy Notebook
+# 🏆 CSIRO Image2Biomass: The "Grandmaster" Strategy
+### End-to-End Solution | Rank #1 Target | Offline-Ready
 
-**Goal**: Achieve Rank #1 using DINOv2 / ConvNeXt V2.
-**Mode**: This notebook is **Adaptive**.
-1.  **If Weights Exist**: It detects saved model files (in `/kaggle/input` or local), skips training, and runs **Inference**.
-2.  **If No Weights**: It downloads the backbone (Internet Required initially), runs **Training**, and saves weights.
+This notebook implements a complete, cut-throat winning strategy designed to maximize the specific **Weighted R²** competition metric. It moves beyond simple regression into State-Aware Ensembling and Metric Hacking.
 
-This allows you to use **ONE** notebook for both developing (training) and submitting (inference).
+## 🚀 Key Winning Components
+1.  **📉 Metric Hacking (Weighted Loss)**:
+    *   The loss function is strictly weighted `[0.1, 0.1, 0.1, 0.2, 0.5]` to match the leaderboard.
+    *   **Effect**: The model prioritizes `Dry_Total_g` (5x importance) above all else.
+2.  **🧠 Heterogeneous Ensemble**:
+    *   Combines **DINOv2** (Semantic/Object Understanding) + **ConvNeXt V2** (Texture/Frequency Analysis).
+    *   Optimized using **Nelder-Mead** to find the mathematically perfect blend ratio.
+3.  **🇦🇺 State-Aware Stratified CV**:
+    *   Strictly stratified by `State` + `Biomass_Bin` while grouping by `Location`.
+    *   Prevents "location leaks" which are common in this dataset.
+4.  **🛰️ FiLM Metadata Injection**:
+    *   Fuses Satellite Data (`Height`, `NDVI`, `EV`) directly into the vision backbone using Feature-wise Linear Modulation.
+
+## 🛠️ How to Run
+*   **Mode A: Training (Internet/Offline)**: If no saved weights are found, it enters **Training Mode**. It trains all backbones, optimizes the ensemble, and saves everything.
+*   **Mode B: Inference (Kaggle Submit)**: If saved `.pth` and `.json` files are found (attached as a Dataset), it skips training and generates `submission.csv` in seconds.
+
+---
+**Configuration**: Scroll down to `CONFIG` to set your offline backbone paths for the Kaggle submission environment.
 """))
 
-    # --- CELL 2: Imports & Config ---
     cells.append(markdown_cell("## 1. Configuration & Imports"))
-    code_imports = """
+    code_config = """
 import os
 import sys
 import glob
+import math
+import copy
+import json
 import numpy as np
 import pandas as pd
 import cv2
@@ -48,6 +64,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.preprocessing import StandardScaler
+from scipy.optimize import minimize
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import timm
@@ -56,25 +74,36 @@ from tqdm import tqdm
 # --- CONFIGURATION ---
 CONFIG = {
     'seed': 42,
-    'img_size': 384,         
-    
-    # Model Choice
-    'backbone': 'vit_base_patch14_dinov2.lvd142m', 
-    # 'backbone': 'convnextv2_base.fcmae',
-    
-    'batch_size': 8,          
-    'epochs': 10,
+    'img_size': 384,
+    'batch_size': 8,
+    'epochs': 12,
     'lr': 1e-4,
-    'num_workers': 0,         
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+    
+    # ENSEMBLE CONFIGURATION
+    'backbone_config': [
+        {
+            'name': 'vit_base_patch14_dinov2.lvd142m', 
+            'wgt': '/kaggle/input/dinov2/pytorch/base/1/dinov2_vitb14_pretrain.pth'
+        },
+        {
+            'name': 'convnextv2_base.fcmae',
+            'wgt': None 
+        }
+    ],
+    
+    'meta_cols': ['Height_Ave_cm', 'Pre_GSHH_NDVI', 'Pre_GSHH_EV'], 
     'n_folds': 5,
     'target_cols': ['Dry_Green_g', 'Dry_Dead_g', 'Dry_Clover_g', 'GDM_g', 'Dry_Total_g'],
+    # METRIC WEIGHTS for Loss and Evaluation
+    'target_weights': [0.1, 0.1, 0.1, 0.2, 0.5], 
     
-    # Paths (Auto-dectected usually, but settable)
     'train_csv': 'train.csv',
-    'test_csv': 'test.csv',
-    'img_dir': 'images/', # Or /kaggle/input/csiro-biomass/train
-    'weights_dir': '.',   # Where to look for/save weights
+    'test_csv': 'test.csv', 
+    'img_dir': 'images/',
+    'mixup_alpha': 0.4,
+    'use_tta': True,
+    'use_ema': True
 }
 
 def seed_everything(seed):
@@ -85,332 +114,310 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
 
 seed_everything(CONFIG['seed'])
-print(f"Using device: {CONFIG['device']}")
 """
-    cells.append(code_cell(code_imports))
+    cells.append(code_cell(code_config))
 
-    # --- CELL 3: Metrics ---
-    code_metrics = """
-def weighted_r2_score(y_true, y_pred):
-    weights = np.array([0.1, 0.1, 0.1, 0.2, 0.5])
-    y_true_flat = y_true.flatten()
-    y_pred_flat = y_pred.flatten()
-    n_samples = y_true.shape[0]
-    weights_flat = np.tile(weights, n_samples)
-    y_weighted_mean = np.average(y_true_flat, weights=weights_flat)
-    ss_res = np.sum(weights_flat * (y_true_flat - y_pred_flat) ** 2)
-    ss_tot = np.sum(weights_flat * (y_true_flat - y_weighted_mean) ** 2)
-    if ss_tot < 1e-6: return 0.0
-    return 1 - (ss_res / ss_tot)
-"""
-    cells.append(code_cell(code_metrics))
+    cells.append(code_cell("""
+class ModelEMA:
+    def __init__(self, model, decay=0.999):
+        self.model = copy.deepcopy(model); self.model.eval(); self.decay = decay
+    def update(self, model):
+        with torch.no_grad():
+            for ema_v, model_v in zip(self.model.state_dict().values(), model.state_dict().values()):
+                ema_v.copy_(self.decay * ema_v + (1.0 - self.decay) * model_v)
 
-    # --- CELL 4: CV Strategy ---
-    code_cv = """
-class StateAwareStratifiedGroupKFold:
-    def __init__(self, n_splits=5, shuffle=True, random_state=42):
-        self.sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
-
-    def split(self, X, y, groups):
-        # Bin total biomass for stratification
-        y_bins = pd.qcut(y, q=10, labels=False, duplicates='drop')
-        if isinstance(X, pd.DataFrame) and 'State' in X.columns:
-            stratify_label = X['State'].astype(str) + "_" + y_bins.astype(str)
-        else:
-            stratify_label = y_bins
-        return self.sgkf.split(X, stratify_label, groups=groups)
-"""
-    cells.append(code_cell(code_cv))
-
-    # --- CELL 5: Losses ---
-    code_loss = """
-class TweedieLoss(nn.Module):
-    def __init__(self, p=1.5, epsilon=1e-8):
-        super().__init__()
-        self.p = p 
-        self.epsilon = epsilon
-
-    def forward(self, y_pred, y_true):
-        y_pred = F.softplus(y_pred) + self.epsilon
-        a = y_true * torch.pow(y_pred, 1 - self.p) / (1 - self.p)
-        b = torch.pow(y_pred, 2 - self.p) / (2 - self.p)
-        loss = -a + b
-        return torch.mean(loss)
-
-class BiomassLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.tweedie = TweedieLoss(p=1.5)
-        self.mse = nn.MSELoss()
-        
-    def forward(self, y_pred, y_true):
-        return 0.5 * self.tweedie(y_pred, y_true) + 0.5 * self.mse(y_pred, y_true)
-"""
-    cells.append(code_cell(code_loss))
-
-    # --- CELL 6: Post-Processing ---
-    code_pp = """
-def hierarchical_reconciliation(preds):
-    # Enforce: Green + Dead = Total AND Green >= Clover
-    preds = np.maximum(preds, 0)
-    green = preds[:, 0]
-    dead = preds[:, 1]
-    total = preds[:, 4]
-    
-    sum_comp = green + dead
-    mask = sum_comp > 1e-6
-    scale_factor = np.ones_like(total)
-    scale_factor[mask] = total[mask] / sum_comp[mask]
-    
-    new_preds = preds.copy()
-    new_preds[:, 0] = green * scale_factor
-    new_preds[:, 1] = dead * scale_factor
-    new_preds[:, 2] = np.minimum(preds[:, 2], new_preds[:, 0]) 
-    return new_preds
-"""
-    cells.append(code_cell(code_pp))
-
-    # --- CELL 7: Dataset ---
-    code_data = """
 class CSIRODataset(Dataset):
-    def __init__(self, df, img_dir, transform=None, mode='train'):
-        self.df = df
-        self.img_dir = img_dir
-        self.transform = transform
-        self.mode = mode
-        col_name = 'image_path' if 'image_path' in df.columns else df.columns[0]
-        self.file_names = df[col_name].values
-        if self.mode != 'test':
-            self.labels = df[CONFIG['target_cols']].values.astype(np.float32)
+    def __init__(self, df, img_dir, transform=None, mode='train', meta_scaler=None):
+        self.df = df; self.img_dir = img_dir; self.transform = transform; self.mode = mode
+        self.meta_features = df[CONFIG['meta_cols']].fillna(0).values.astype(np.float32)
+        if meta_scaler: self.meta_features = meta_scaler.transform(self.meta_features)
+        col = 'image_path' if 'image_path' in df.columns else df.columns[0]
+        self.files = df[col].values
+        if mode != 'test': self.labels = df[CONFIG['target_cols']].values.astype(np.float32)
 
-    def __len__(self):
-        return len(self.df)
+    def __len__(self): return len(self.df)
 
     def __getitem__(self, idx):
-        file_path = self.file_names[idx]
-        full_path = get_image_path(file_path, self.img_dir)
-            
-        image = cv2.imread(full_path)
-        if image is None: # Safety
-            image = np.zeros((CONFIG['img_size'], CONFIG['img_size'], 3), dtype=np.uint8)
-        else:
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        if self.transform:
-            image = self.transform(image=image)['image']
-            
-        if self.mode != 'test':
-            return image, torch.tensor(self.labels[idx])
-        return image
-
-def get_image_path(filename, search_dir):
-    # Robust path finding (handles flat dirs or subdirs)
-    p = os.path.join(search_dir, filename)
-    if os.path.exists(p): return p
-    # Try just basename in search_dir
-    p = os.path.join(search_dir, os.path.basename(filename))
-    if os.path.exists(p): return p
-    return filename # Fallback
+        path = self.files[idx]
+        full = os.path.join(self.img_dir, path) if os.path.exists(os.path.join(self.img_dir, path)) else os.path.join(self.img_dir, os.path.basename(path))
+        img = cv2.imread(full)
+        if img is None: img = np.zeros((CONFIG['img_size'], CONFIG['img_size'], 3), dtype=np.uint8)
+        else: img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        if self.transform: img = self.transform(image=img)['image']
+        meta = torch.tensor(self.meta_features[idx])
+        if self.mode != 'test': return img, meta, torch.tensor(self.labels[idx])
+        return img, meta
 
 def get_transforms(img_size):
-    MEAN = [0.485, 0.456, 0.406]
-    STD = [0.229, 0.224, 0.225]
+    MEAN = [0.485, 0.456, 0.406]; STD = [0.229, 0.224, 0.225]
     return {
-        'train': A.Compose([
-            A.RandomResizedCrop(img_size, img_size, scale=(0.8, 1.0)),
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.5),
-            A.Normalize(mean=MEAN, std=STD),
-            ToTensorV2(),
-        ]),
-        'valid': A.Compose([
-            A.Resize(img_size, img_size),
-            A.Normalize(mean=MEAN, std=STD),
-            ToTensorV2(),
-        ])
+        'train': A.Compose([A.RandomResizedCrop(img_size, img_size, scale=(0.8, 1.0)), A.HorizontalFlip(p=0.5), A.VerticalFlip(p=0.5), A.Normalize(mean=MEAN, std=STD), ToTensorV2()]),
+        'valid': A.Compose([A.Resize(img_size, img_size), A.Normalize(mean=MEAN, std=STD), ToTensorV2()]),
+        'tta': A.Compose([A.HorizontalFlip(p=1.0), A.Resize(img_size, img_size), A.Normalize(mean=MEAN, std=STD), ToTensorV2()])
     }
-"""
-    cells.append(code_cell(code_data))
 
-    # --- CELL 8: Model ---
+def mixup_data(x, meta, y, alpha=1.0):
+    if alpha > 0: lam = np.random.beta(alpha, alpha)
+    else: lam = 1
+    idx = torch.randperm(x.size(0)).to(x.device)
+    return lam * x + (1 - lam) * x[idx, :], lam * meta + (1 - lam) * meta[idx, :], y, y[idx], lam
+
+def mixup_criterion(crit, pred, y_a, y_b, lam):
+    return lam * crit(pred, y_a) + (1 - lam) * crit(pred, y_b)
+"""))
+
     code_model = """
-class BiomassModel(nn.Module):
-    def __init__(self, model_name, num_classes=5, pretrained=True):
+class FiLM(nn.Module):
+    def __init__(self, feature_dim, meta_dim):
         super().__init__()
-        self.backbone = timm.create_model(model_name, pretrained=pretrained, num_classes=0)
-        self.n_features = self.backbone.num_features
-        self.head = nn.Sequential(
-            nn.Linear(self.n_features, 512),
-            nn.BatchNorm1d(512),
-            nn.SiLU(),
-            nn.Dropout(0.2),
-            nn.Linear(512, num_classes)
-        )
+        self.scale = nn.Linear(meta_dim, feature_dim)
+        self.shift = nn.Linear(meta_dim, feature_dim)
+    def forward(self, features, meta):
+        return self.scale(meta) * features + self.shift(meta)
+
+class BiomassModel(nn.Module):
+    def __init__(self, model_name, num_classes=5, pretrained=False, checkpoint_path=None, meta_dim=3):
+        super().__init__()
+        self.backbone = timm.create_model(model_name, pretrained=False, num_classes=0)
+        if pretrained:
+            if checkpoint_path and os.path.exists(checkpoint_path):
+                print(f"Loading OFFLINE: {checkpoint_path}")
+                try: self.backbone.load_state_dict(torch.load(checkpoint_path, map_location='cpu'), strict=False)
+                except: pass
+            elif checkpoint_path is None:
+                try: self.backbone = timm.create_model(model_name, pretrained=True, num_classes=0)
+                except: pass
+        self.film = FiLM(self.backbone.num_features, meta_dim)
+        self.head = nn.Sequential(nn.Linear(self.backbone.num_features, 512), nn.BatchNorm1d(512), nn.SiLU(), nn.Dropout(0.2), nn.Linear(512, num_classes))
+
+    def forward(self, x, meta):
+        return self.head(self.film(self.backbone(x), meta))
+
+# --- METRIC HACKING LOSS ---
+class WeightedBiomassLoss(nn.Module):
+    def __init__(self, weights=CONFIG['target_weights']):
+        super().__init__()
+        # Weights: [0.1, 0.1, 0.1, 0.2, 0.5]
+        self.weights = torch.tensor(weights).float()
+        self.mse = nn.MSELoss(reduction='none') # REDUCTION NONE to allow weighting
         
-    def forward(self, x):
-        return self.head(self.backbone(x))
+    def forward(self, yp, yt):
+        # Ensure weights are on same device
+        w = self.weights.to(yp.device)
+        
+        # Tweedie (Reduction None)
+        tweedie = -yt * torch.pow(F.softplus(yp)+1e-8, -0.5)/-0.5 + torch.pow(F.softplus(yp)+1e-8, 0.5)/0.5
+        
+        # MSE (Reduction None)
+        mse = (yp - yt) ** 2
+        
+        # Combine
+        loss = 0.5 * tweedie + 0.5 * mse # [Batch, 5]
+        
+        # Apply Competition Weights
+        loss = loss * w # Broadcasts across batch
+        
+        return torch.mean(loss) # Scalar
+
+def hierarchical_reconciliation(preds):
+    preds = np.maximum(preds, 0)
+    s = preds[:,0]+preds[:,1]; m=s>1e-6; r=np.ones_like(preds[:,4]); r[m]=preds[m,4]/s[m]
+    preds[:,0]*=r; preds[:,1]*=r; preds[:,2]=np.minimum(preds[:,2], preds[:,0])
+    return preds
+
+def weighted_r2_score(y_true, y_pred):
+    weights = np.array(CONFIG['target_weights']) 
+    y_true_flat = y_true.flatten(); y_pred_flat = y_pred.flatten()
+    n = y_true.shape[0]; w_flat = np.tile(weights, n)
+    y_mean = np.average(y_true_flat, weights=w_flat)
+    ss_res = np.sum(w_flat * (y_true_flat - y_pred_flat) ** 2)
+    ss_tot = np.sum(w_flat * (y_true_flat - y_mean) ** 2)
+    return 1 - (ss_res / (ss_tot + 1e-6))
 """
     cells.append(code_cell(code_model))
 
-    # --- CELL 9: Training Loop ---
-    code_train_loop = """
-def train_epoch(model, loader, criterion, optimizer, device):
-    model.train()
-    running_loss = 0.0
-    for images, targets in tqdm(loader, desc="Train", leave=False):
-        images, targets = images.to(device), targets.to(device)
-        optimizer.zero_grad()
-        loss = criterion(model(images), targets)
-        loss.backward()
-        optimizer.step()
-        running_loss += loss.item() * images.size(0)
-    return running_loss / len(loader.dataset)
-
-def validate(model, loader, criterion, device):
-    model.eval()
-    running_loss = 0.0
-    preds_list, targets_list = [], []
-    with torch.no_grad():
-        for images, targets in tqdm(loader, desc="Valid", leave=False):
-            images, targets = images.to(device), targets.to(device)
-            outputs = model(images)
-            loss = criterion(outputs, targets)
-            running_loss += loss.item() * images.size(0)
-            preds_list.append(outputs.cpu().numpy())
-            targets_list.append(targets.cpu().numpy())
+    code_optim = """
+# --- OPTIMIZATION LOGIC ---
+def optimize_ensemble_weights(oof_dict, y_true):
+    print("\\n>>> Optimizing Ensemble Weights (Nelder-Mead)...")
+    model_names = list(oof_dict.keys())
+    n_models = len(model_names)
+    if n_models < 2:
+        return {m: 1.0 for m in model_names}
     
-    all_preds = hierarchical_reconciliation(np.vstack(preds_list))
-    all_targets = np.vstack(targets_list)
-    score = weighted_r2_score(all_targets, all_preds)
-    return running_loss / len(loader.dataset), score, all_preds
-"""
-    cells.append(code_cell(code_train_loop))
+    def objective(weights):
+        w = np.exp(weights) / np.sum(np.exp(weights)) 
+        final_oof = np.zeros_like(list(oof_dict.values())[0])
+        for i, m_name in enumerate(model_names):
+            final_oof += w[i] * oof_dict[m_name]
+        score = weighted_r2_score(y_true, hierarchical_reconciliation(final_oof))
+        return -score
 
-    # --- CELL 10: Execution Functions (Train & Infer) ---
-    code_execution = """
+    init_weights = np.zeros(n_models)
+    res = minimize(objective, init_weights, method='Nelder-Mead', tol=1e-4)
+    best_weights_raw = np.exp(res.x) / np.sum(np.exp(res.x))
+    
+    final_weights = {}
+    print("Optimal Weights:")
+    for i, m_name in enumerate(model_names):
+        final_weights[m_name] = float(best_weights_raw[i])
+        print(f"  {m_name}: {final_weights[m_name]:.4f}")
+        
+    return final_weights
+"""
+    cells.append(code_cell(code_optim))
+
+    code_train = """
 def run_training():
-    print("Starting TRAINING Pipeline...")
-    if not os.path.exists(CONFIG['train_csv']):
-        print(f"Error: {CONFIG['train_csv']} not found.")
-        return
-
+    print(">>> STARTING TRAINING (Weighted Loss + R2 Monitoring)")
     df = pd.read_csv(CONFIG['train_csv'])
+    meta_scaler = StandardScaler()
+    df[CONFIG['meta_cols']] = df[CONFIG['meta_cols']].fillna(0)
+    meta_scaler.fit(df[CONFIG['meta_cols']])
+    
     groups = df['location_id'] if 'location_id' in df.columns else df.index
+    y_bins = pd.qcut(df['Dry_Total_g'], 5, labels=False).astype(str)
+    stratify_label = df['State'].astype(str) + "_" + y_bins if 'State' in df.columns else y_bins
     
-    cv = StateAwareStratifiedGroupKFold(n_splits=CONFIG['n_folds'])
-    oof_preds = np.zeros((len(df), 5))
+    kf = StratifiedGroupKFold(n_splits=CONFIG['n_folds'])
+    oof_store = {} 
     
-    for fold, (train_idx, val_idx) in enumerate(cv.split(df, df['Dry_Total_g'], groups=groups)):
-        print(f"\\n{'='*20} FOLD {fold} {'='*20}")
-        train_df = df.iloc[train_idx].reset_index(drop=True)
-        val_df = df.iloc[val_idx].reset_index(drop=True)
+    fold_indices = []
+    for f, (t, v) in enumerate(kf.split(df, stratify_label, groups=groups)):
+        fold_indices.append((t, v))
         
-        train_loader = DataLoader(
-            CSIRODataset(train_df, CONFIG['img_dir'], transform=get_transforms(CONFIG['img_size'])['train']),
-            batch_size=CONFIG['batch_size'], shuffle=True, num_workers=CONFIG['num_workers']
-        )
-        val_loader = DataLoader(
-            CSIRODataset(val_df, CONFIG['img_dir'], transform=get_transforms(CONFIG['img_size'])['valid']),
-            batch_size=CONFIG['batch_size'], shuffle=False, num_workers=CONFIG['num_workers']
-        )
+    for cfg in CONFIG['backbone_config']:
+        name = cfg['name']; wgt_path = cfg['wgt']; safe_name = name.replace(".", "_")
+        print(f"\\n--- Training {name} ---")
         
-        model = BiomassModel(CONFIG['backbone'], pretrained=True).to(CONFIG['device'])
-        optimizer = torch.optim.AdamW(model.parameters(), lr=CONFIG['lr'])
-        criterion = BiomassLoss()
+        current_oof = np.zeros((len(df), 5))
         
-        best_score = -np.inf
-        for epoch in range(CONFIG['epochs']):
-            train_loss = train_epoch(model, train_loader, criterion, optimizer, CONFIG['device'])
-            val_loss, val_score, _ = validate(model, val_loader, criterion, CONFIG['device'])
-            print(f"Ep {epoch+1} | T: {train_loss:.4f} V: {val_loss:.4f} Score: {val_score:.4f}")
+        for fold, (t_idx, v_idx) in enumerate(fold_indices):
+            print(f"\\nFold {fold}")
+            td = df.iloc[t_idx].reset_index(drop=True); vd = df.iloc[v_idx].reset_index(drop=True)
+            tl = DataLoader(CSIRODataset(td, CONFIG['img_dir'], transform=get_transforms(384)['train'], meta_scaler=meta_scaler), batch_size=CONFIG['batch_size'], shuffle=True, num_workers=0)
+            vl = DataLoader(CSIRODataset(vd, CONFIG['img_dir'], transform=get_transforms(384)['valid'], meta_scaler=meta_scaler), batch_size=CONFIG['batch_size'], shuffle=False, num_workers=0)
             
-            if val_score > best_score:
-                best_score = val_score
-                torch.save(model.state_dict(), f"model_fold{fold}.pth")
-                print(f"  >>> Saved model_fold{fold}.pth")
+            model = BiomassModel(name, pretrained=True, checkpoint_path=wgt_path, meta_dim=len(CONFIG['meta_cols']))
+            model.to(CONFIG['device'])
+            ema = ModelEMA(model) if CONFIG['use_ema'] else None
+            opt = torch.optim.AdamW(model.parameters(), lr=CONFIG['lr'])
+            crit = WeightedBiomassLoss() # METRIC HACKING LOSS
+            
+            model.train()
+            for ep in range(CONFIG['epochs']):
+                lr = CONFIG['lr'] * 0.5 * (1 + math.cos(math.pi * ep / CONFIG['epochs']))
+                for pg in opt.param_groups: pg['lr'] = lr
+                loss_list = []
+                for img, meta, tgt in tl:
+                    img, meta, tgt = img.to(CONFIG['device']), meta.to(CONFIG['device']), tgt.to(CONFIG['device'])
+                    opt.zero_grad()
+                    if CONFIG['mixup_alpha'] > 0:
+                        img, meta, ya, yb, lam = mixup_data(img, meta, tgt, CONFIG['mixup_alpha'])
+                        loss = mixup_criterion(crit, model(img, meta), ya, yb, lam)
+                    else:
+                        loss = crit(model(img, meta), tgt)
+                    loss.backward(); opt.step()
+                    if ema: ema.update(model)
+                    loss_list.append(loss.item())
+            
+            # Predict Valid for OOF & Monitor R2
+            best_model = ema.model if ema else model
+            best_model.eval()
+            fold_preds = []; fold_truth = vd[CONFIG['target_cols']].values
+            with torch.no_grad():
+                for img, meta in vl:
+                    img, meta = img.to(CONFIG['device']), meta.to(CONFIG['device'])
+                    fold_preds.append(best_model(img, meta).cpu().numpy())
+            
+            fold_preds_arr = np.vstack(fold_preds)
+            current_oof[v_idx] = fold_preds_arr
+            
+            # MONITORING
+            r2 = weighted_r2_score(fold_truth, hierarchical_reconciliation(fold_preds_arr))
+            print(f"  >> Fold {fold} Val Weighted R2: {r2:.4f}")
+            
+            torch.save(best_model.state_dict(), f"{safe_name}_fold{fold}.pth")
+        
+        oof_store[name] = current_oof
 
-def run_inference(weight_files):
-    print("Starting INFERENCE Pipeline...")
-    if not os.path.exists(CONFIG['test_csv']):
-        print("Test CSV not found. Skipping inference.")
-        return
-
-    test_df = pd.read_csv(CONFIG['test_csv'])
-    test_ds = CSIRODataset(test_df, CONFIG['img_dir'], transform=get_transforms(CONFIG['img_size'])['valid'], mode='test')
-    test_loader = DataLoader(test_ds, batch_size=CONFIG['batch_size'], shuffle=False, num_workers=CONFIG['num_workers'])
+    # RUN NELDER-MEAD
+    y_true = df[CONFIG['target_cols']].values
+    best_weights = optimize_ensemble_weights(oof_store, y_true)
     
-    # Load all models for bagging
-    models = []
-    for w in weight_files:
-        print(f"Loading weights: {w}")
-        m = BiomassModel(CONFIG['backbone'], pretrained=False) # Important: pretrained=False for inference
+    with open("ensemble_weights.json", "w") as f:
+        json.dump(best_weights, f)
+    print("Saved ensemble_weights.json")
+
+def run_inference(weights):
+    print(f">>> INFERENCE (Optimized) with {len(weights)} models")
+    td = pd.read_csv(CONFIG['test_csv'])
+    meta_scaler = StandardScaler()
+    meta_scaler.fit(td[CONFIG['meta_cols']].fillna(0))
+    
+    ensemble_weights = None
+    if os.path.exists("ensemble_weights.json"):
+        with open("ensemble_weights.json", "r") as f: ensemble_weights = json.load(f)
+    elif os.path.exists("/kaggle/input"):
+        fs = glob.glob("/kaggle/input/*/ensemble_weights.json")
+        if fs:
+            with open(fs[0], "r") as f: ensemble_weights = json.load(f)
+            
+    loaders = [DataLoader(CSIRODataset(td, CONFIG['img_dir'], transform=get_transforms(384)['valid'], mode='test', meta_scaler=meta_scaler), batch_size=CONFIG['batch_size'])]
+    if CONFIG['use_tta']: loaders.append(DataLoader(CSIRODataset(td, CONFIG['img_dir'], transform=get_transforms(384)['tta'], mode='test', meta_scaler=meta_scaler), batch_size=CONFIG['batch_size']))
+    
+    models_dict = {}
+    for w in weights:
+        arch = 'convnextv2_base.fcmae' if 'convnext' in w else 'vit_base_patch14_dinov2.lvd142m'
+        if arch not in models_dict: models_dict[arch] = []
+        m = BiomassModel(arch, pretrained=False, meta_dim=len(CONFIG['meta_cols']))
         m.load_state_dict(torch.load(w, map_location=CONFIG['device']))
-        m.to(CONFIG['device'])
-        m.eval()
-        models.append(m)
-        
-    final_preds = []
+        m.to(CONFIG['device']).eval(); models_dict[arch].append(m)
+
+    final = np.zeros((len(td), 5))
+    backbone_preds = {}
     with torch.no_grad():
-        for images in tqdm(test_loader, desc="Infer"):
-            images = images.to(CONFIG['device'])
-            batch_preds = []
-            for m in models:
-                batch_preds.append(m(images).cpu().numpy())
-            # Average across models (Bagging)
-            avg_batch = np.mean(batch_preds, axis=0)
-            final_preds.append(avg_batch)
+        for arch, model_list in models_dict.items():
+            arch_accum = np.zeros((len(td), 5))
+            for l in loaders:
+                loader_acc = []
+                for img, meta in tqdm(l, desc=arch):
+                    img, meta = img.to(CONFIG['device']), meta.to(CONFIG['device'])
+                    p = [m(img, meta).cpu().numpy() for m in model_list]
+                    loader_acc.append(np.mean(p, axis=0))
+                arch_accum += np.vstack(loader_acc)
+            backbone_preds[arch] = arch_accum / len(loaders)
             
-    all_preds = np.vstack(final_preds)
-    all_preds = hierarchical_reconciliation(all_preds) # Apply post-process constraints
-    
-    # Create Submission
-    submission = pd.DataFrame(all_preds, columns=CONFIG['target_cols'])
-    # Add ID or whatever format/structure is needed. 0.69 nb melts it. 
-    # For now, we save raw format and let user inspect.
-    submission.to_csv('submission.csv', index=False)
-    print("Saved submission.csv")
-"""
-    cells.append(code_cell(code_execution))
-
-    # --- CELL 11: Unified Main ---
-    code_main = """
-if __name__ == "__main__":
-    # 1. Look for existing weights
-    # We check typical places: current dir, or /kaggle/input
-    possible_weights = glob.glob("*.pth") + glob.glob("/kaggle/input/*/model_fold*.pth")
-    
-    if len(possible_weights) > 0:
-        print(f"Found {len(possible_weights)} weights! Switching to INFERENCE mode.")
-        run_inference(possible_weights)
+    if ensemble_weights:
+        print("Blending:", ensemble_weights)
+        for arch, preds in backbone_preds.items():
+            w = ensemble_weights.get(arch, 1.0 / len(backbone_preds))
+            final += w * preds
     else:
-        print("No weights found. Switching to TRAINING mode.")
-        # Note: In Kaggle Submit environment, this might fail if no internet.
-        # But this is what the user asked for: Single Notebook Logic.
-        run_training()
-"""
-    cells.append(code_cell(code_main))
+        for preds in backbone_preds.values(): final += preds
+        final /= len(backbone_preds)
 
-    # --- SAVE ---
+    final = hierarchical_reconciliation(final)
+    sub = pd.DataFrame(final, columns=CONFIG['target_cols'])
+    if 'image_path' in td.columns: sub.insert(0, 'image_path', td['image_path'])
+    sub.to_csv('submission.csv', index=False)
+    print("Saved submission.csv")
+
+if __name__ == "__main__":
+    w = [x for x in glob.glob("*.pth") + glob.glob("/kaggle/input/*/*.pth") if "pretrain" not in x and "checkpoint" not in x]
+    if len(w) > 0: run_inference(w)
+    else: run_training()
+"""
+    cells.append(code_cell(code_train))
+
     notebook_content = {
         "cells": cells,
-        "metadata": {
-            "kernelspec": {
-                "display_name": "Python 3",
-                "language": "python",
-                "name": "python3"
-            },
-            "language_info": {
-                "name": "python",
-                "version": "3.10"
-            }
-        },
-        "nbformat": 4,
-        "nbformat_minor": 5
+        "metadata": {"kernelspec": {"display_name": "Python 3","language": "python","name": "python3"},"language_info": {"name": "python","version": "3.10"}},
+        "nbformat": 4, "nbformat_minor": 5
     }
-
     with open('csiro_winning_strategy.ipynb', 'w') as f:
         json.dump(notebook_content, f, indent=1)
-    print("Notebook refined: csiro_winning_strategy.ipynb (Unified Train/Infer)")
+    print("Notebook refined: csiro_winning_strategy.ipynb (Metric Hacking)")
 
 if __name__ == "__main__":
     create_winning_notebook()
